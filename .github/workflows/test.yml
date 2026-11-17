@@ -22,11 +22,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t tab-queue server
-      - run: |
-          docker run -d --name tq -p 18080:8080 -e TQ_TOKEN="$(openssl rand -hex 24)" tab-queue
-          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18080/health && exit 0; sleep 1; done
-          docker logs tq; exit 1
+      # the shipped compose example: bind mount ./data (owned by the host user, not by the container user)
+      - name: compose up with the bind-mounted data folder
+        working-directory: server
+        run: |
+          cp docker-compose.example.yml docker-compose.yml
+          echo "TQ_TOKEN=$(openssl rand -hex 24)" > .env
+          mkdir data
+          docker compose up -d --build
+          ok=0
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/health && ok=1 && break; sleep 1; done
+          if [ "$ok" != 1 ]; then docker compose logs; exit 1; fi
+          test -s data/key || { echo "data/key was not written"; docker compose logs; exit 1; }
+          test -f data/queue.db || { echo "data/queue.db missing"; exit 1; }
+          # survives a restart (the restart loop was the symptom)
+          docker compose restart
+          ok=0
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8080/health && ok=1 && break; sleep 1; done
+          [ "$ok" = 1 ] || { docker compose logs; exit 1; }
+          test "$(docker compose exec -T tab-queue id -u)" != 0 || { echo "server runs as root"; exit 1; }
+          docker compose down
   macos:
     runs-on: macos-latest
     steps:
