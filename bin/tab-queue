@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""tab-queue: one Chrome window on your Mac becomes a queue you can see from your phone.
+
+  tab-queue install [--server URL] [options]   set up the robot (and a local server unless --server is given)
+  tab-queue status                             is it running? last robot lines, server health
+  tab-queue link                               print the secret page link
+  tab-queue rotate-key                         make a new secret link (the old one stops working)
+  tab-queue send-front                         move the front Chrome tab to the queue window
+  tab-queue once                               run the robot once now, verbose
+  tab-queue serve                              run the local server in the foreground
+  tab-queue uninstall                          stop and remove the LaunchAgents (keeps config and data)
+
+Python 3.9+ standard library only. See README.md.
+"""
+import argparse
+import json
+import os
+import secrets
+import socket
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+VERSION = "0.1.0"
+SRC = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.environ.get("TQ_CONFIG_DIR", os.path.join(HOME, ".config", "tab-queue"))
+SHARE = os.environ.get("TQ_SHARE_DIR", os.path.join(HOME, ".local", "share", "tab-queue"))
+STATE = os.environ.get("TQ_STATE_DIR", os.path.join(HOME, ".local", "state", "tab-queue"))
+AGENTS = os.environ.get("TQ_AGENTS_DIR", os.path.join(HOME, "Library", "LaunchAgents"))
+CONFIG = os.path.join(CONFIG_DIR, "config.json")
+SERVER_CONFIG = os.path.join(CONFIG_DIR, "server.json")
+APP = os.path.join(SHARE, "app")
+ROBOT_LABEL = "local.tab-queue.robot"
+SERVER_LABEL = "local.tab-queue.server"
+DEFAULT_ROUTES = [r"^https?://(127\.0\.0\.1|localhost):4387/session/"]
+NO_LAUNCHCTL = os.environ.get("TQ_NO_LAUNCHCTL") == "1"  # tests
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def write_private(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def load_config():
+    if not os.path.exists(CONFIG):
+        die("Not installed: %s is missing. Run: tab-queue install" % CONFIG)
+    with open(CONFIG) as f:
+        return json.load(f)
+
+
+def http(cfg, method, path, body=None, timeout=10):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(cfg["server"].rstrip("/") + path, data=data, method=method,
+                                 headers={"X-Token": cfg["token"], "Content-Type": "application/json",
+                                          "User-Agent": "tab-queue-cli/" + VERSION})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def plist(label, args, env=None, interval=None, keepalive=False, log=None):
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+             '<plist version="1.0"><dict>',
+             "<key>Label</key><string>%s</string>" % esc(label),
+             "<key>ProgramArguments</key><array>" + "".join("<string>%s</string>" % esc(a) for a in args) + "</array>",
+             "<key>RunAtLoad</key><true/>"]
+    if interval:
+        lines.append("<key>StartInterval</key><integer>%d</integer>" % int(interval))
+    if keepalive:
+        lines.append("<key>KeepAlive</key><true/>")
+    if env:
+        lines.append("<key>EnvironmentVariables</key><dict>" +
+                     "".join("<key>%s</key><string>%s</string>" % (esc(k), esc(v)) for k, v in env.items()) + "</dict>")
+    if log:
+        lines.append("<key>StandardOutPath</key><string>%s</string>" % esc(log))
+        lines.append("<key>StandardErrorPath</key><string>%s</string>" % esc(log))
+    lines.append("<key>ProcessType</key><string>Background</string>")
+    lines.append("</dict></plist>\n")
+    return "\n".join(lines)
+
+
+def launchctl_load(label, path):
+    if NO_LAUNCHCTL:
+        return
+    dom = "gui/%d" % os.getuid()
+    subprocess.run(["launchctl", "bootout", dom + "/" + label], capture_output=True)
+    # bootout returns before the job is gone; bootstrap right after it fails with "5: Input/output error"
+    for _ in range(50):
+        if subprocess.run(["launchctl", "print", dom + "/" + label], capture_output=True).returncode:
+            break
+        time.sleep(0.2)
+    r = None
+    for attempt in range(5):
+        r = subprocess.run(["launchctl", "bootstrap", dom, path], capture_output=True, text=True)
+        if not r.returncode:
+            return
+        time.sleep(0.5 * (attempt + 1))
+    die("launchctl bootstrap %s failed: %s" % (label, r.stderr.strip()))
+
+
+def launchctl_state(label):
+    if NO_LAUNCHCTL:
+        return "not checked (TQ_NO_LAUNCHCTL)"
+    r = subprocess.run(["launchctl", "print", "gui/%d/%s" % (os.getuid(), label)], capture_output=True, text=True)
+    if r.returncode:
+        return "not loaded"
+    info = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        for k in ("state", "last exit code", "runs"):
+            if line.startswith(k + " = "):
+                info[k] = line.split(" = ", 1)[1]
+    return ", ".join("%s %s" % (k, v) for k, v in info.items()) or "loaded"
+
+
+def copy_app():
+    """launchd runs a fixed copy, not the plugin folder (its path changes with each plugin version)."""
+    tmp = APP + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    for d in ("bin", "robot", "server"):
+        shutil.copytree(os.path.join(SRC, d), os.path.join(tmp, d),
+                        ignore=shutil.ignore_patterns("__pycache__", "data", "*.pyc"))
+    with open(os.path.join(tmp, "VERSION"), "w") as f:
+        f.write(VERSION + "\n")
+    shutil.rmtree(APP, ignore_errors=True)
+    os.rename(tmp, APP)
+
+
+def cmd_install(a):
+    old = {}
+    if os.path.exists(CONFIG):
+        with open(CONFIG) as f:
+            old = json.load(f)
+    local = False if a.server else old.get("local", True)
+    token = None
+    if a.token_file:
+        with open(os.path.expanduser(a.token_file)) as f:
+            token = f.read().strip()
+    token = token or os.environ.get("TQ_TOKEN") or old.get("token")
+    if not local and not token:
+        die("A remote server needs its robot token: put it in a file and pass --token-file, or set TQ_TOKEN.")
+    token = token or secrets.token_urlsafe(24)
+    port = a.port or old.get("port") or 8765
+    server = "http://127.0.0.1:%d" % port if local else (a.server or old["server"])
+    cfg = {
+        "server": server.rstrip("/"),
+        "token": token,
+        "local": local,
+        "port": port,
+        "listen": a.listen or old.get("listen") or "127.0.0.1",
+        "window": a.window if a.window is not None else old.get("window", "largest"),
+        "interval": a.interval or old.get("interval", 30),
+        "open_method": a.open_method or old.get("open_method", "applescript"),
+        "route_to_queue": a.route if a.route is not None else old.get("route_to_queue", DEFAULT_ROUTES),
+        "chrome_app": old.get("chrome_app", "Google Chrome"),
+    }
+    if isinstance(cfg["window"], str) and cfg["window"].isdigit():
+        cfg["window"] = int(cfg["window"])
+    # public_url is stored only when the user gave one; otherwise the link is worked out when it is printed
+    public = a.public_url or (None if a.server and a.server.rstrip("/") != old.get("server") else old.get("public_url"))
+    if public:
+        cfg["public_url"] = public.rstrip("/")
+    write_private(CONFIG, json.dumps(cfg, indent=2) + "\n")
+    copy_app()
+    os.makedirs(STATE, exist_ok=True)
+    os.makedirs(AGENTS, exist_ok=True)
+
+    if local:
+        scfg = {}
+        if os.path.exists(SERVER_CONFIG):
+            with open(SERVER_CONFIG) as f:
+                scfg = json.load(f)
+        if a.lang:
+            scfg["lang"] = a.lang
+        for r in a.rewrite or []:
+            src, _, dst = r.partition("=")
+            scfg.setdefault("rewrites", [])
+            scfg["rewrites"] = [x for x in scfg["rewrites"] if x.get("from") != src] + [{"from": src, "to": dst}]
+        write_private(SERVER_CONFIG, json.dumps(scfg, indent=2) + "\n")
+        env = {"TQ_TOKEN": token, "TQ_DATA": os.path.join(SHARE, "data"), "TQ_PORT": str(port),
+               "TQ_HOST": cfg["listen"], "TQ_CONFIG": SERVER_CONFIG}
+        sp = os.path.join(AGENTS, SERVER_LABEL + ".plist")
+        write_private(sp, plist(SERVER_LABEL, ["/usr/bin/python3", os.path.join(APP, "server", "app.py")], env=env,
+                                keepalive=True, log=os.path.join(STATE, "server.log")))
+        launchctl_load(SERVER_LABEL, sp)
+    rp = os.path.join(AGENTS, ROBOT_LABEL + ".plist")
+    with open(rp, "w") as f:
+        f.write(plist(ROBOT_LABEL, ["/usr/bin/osascript", "-l", "JavaScript", os.path.join(APP, "robot", "robot.js")],
+                      interval=cfg["interval"], log=os.path.join(STATE, "launchd.out")))
+    launchctl_load(ROBOT_LABEL, rp)
+    if a.link_bin:
+        b = os.path.join(HOME, ".local", "bin", "tab-queue")
+        os.makedirs(os.path.dirname(b), exist_ok=True)
+        if os.path.islink(b) or os.path.exists(b):
+            os.remove(b)
+        os.symlink(os.path.join(APP, "bin", "tab-queue"), b)
+    print("Installed tab-queue %s (%s server %s)." % (VERSION, "local" if local else "remote", cfg["server"]))
+    print("Robot every %ss, queue window: %s, open method: %s." % (cfg["interval"], cfg["window"], cfg["open_method"]))
+    print("The first run may ask to let osascript control Google Chrome and System Events: allow it.")
+    print("Next: tab-queue link   (prints the page link for your phone)")
+
+
+def cmd_uninstall(a):
+    for label in (ROBOT_LABEL, SERVER_LABEL):
+        p = os.path.join(AGENTS, label + ".plist")
+        if not NO_LAUNCHCTL:
+            subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), label)], capture_output=True)
+        if os.path.exists(p):
+            os.remove(p)
+            print("removed", p)
+    print("Config (%s) and data (%s) were kept." % (CONFIG_DIR, SHARE))
+
+
+def lan_host():
+    """The name or address other devices on the network can use to reach this Mac."""
+    try:
+        r = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip() + ".local"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; it only picks the outgoing interface
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return socket.gethostname()
+
+
+def base_url(cfg):
+    """Where the phone reaches the server: the stored public_url, else worked out from the current config."""
+    if cfg.get("public_url"):
+        return cfg["public_url"].rstrip("/")
+    if not cfg.get("local", True):
+        return cfg["server"].rstrip("/")
+    listen = cfg.get("listen") or "127.0.0.1"
+    host = lan_host() if listen in ("0.0.0.0", "::") else listen
+    return "http://%s:%d" % (host, cfg.get("port", 8765))
+
+
+def page_link(cfg, key):
+    return "%s/%s/" % (base_url(cfg), key)
+
+
+def save_link(link):
+    write_private(os.path.join(CONFIG_DIR, "link.txt"), link + "\n")
+
+
+def cmd_link(a):
+    cfg = load_config()
+    try:
+        info = http(cfg, "GET", "/api/robot/info")
+    except Exception as e:
+        die("Server %s did not answer: %s" % (cfg["server"], e))
+    link = page_link(cfg, info["key"])
+    save_link(link)
+    print(link)
+
+
+def cmd_rotate(a):
+    cfg = load_config()
+    try:
+        info = http(cfg, "POST", "/api/robot/rotate-key", {})
+    except Exception as e:
+        die("Server %s did not answer: %s" % (cfg["server"], e))
+    link = page_link(cfg, info["key"])
+    save_link(link)
+    print("New link (the old one now answers 404):")
+    print(link)
+
+
+def tail(path, n):
+    try:
+        with open(path, errors="replace") as f:
+            return f.readlines()[-n:]
+    except OSError:
+        return []
+
+
+def cmd_status(a):
+    cfg = load_config()
+    ok = True
+    print("tab-queue %s" % VERSION)
+    inst = os.path.join(APP, "VERSION")
+    iv = open(inst).read().strip() if os.path.exists(inst) else "missing"
+    print("installed copy: %s%s" % (iv, "" if iv == VERSION else "  (differs: run tab-queue install again)"))
+    print("server: %s (%s)" % (cfg["server"], "local" if cfg.get("local") else "remote"))
+    print("queue window: %s, open method: %s, every %ss" % (cfg.get("window"), cfg.get("open_method"), cfg.get("interval")))
+    print("robot agent: %s" % launchctl_state(ROBOT_LABEL))
+    if cfg.get("local"):
+        print("server agent: %s" % launchctl_state(SERVER_LABEL))
+    try:
+        info = http(cfg, "GET", "/api/robot/info")
+        last = info.get("last_sync")
+        ago = "never" if not last else "%d s ago" % (time.time() - last)
+        print("server: up, version %s, %s items, last robot sync %s" % (info.get("version"), info.get("items"), ago))
+        if not last or time.time() - last > 3 * int(cfg.get("interval", 30)) + 30:
+            ok = False
+            print("WARNING: the robot has not synced recently (see the log below).")
+    except Exception as e:
+        ok = False
+        print("server: NOT answering (%s)" % e)
+    lines = tail(os.path.join(STATE, "robot.log"), a.lines)
+    if lines:
+        print("last robot log lines (%s):" % os.path.join(STATE, "robot.log"))
+        sys.stdout.write("".join("  " + l for l in lines))
+    sys.exit(0 if ok else 1)
+
+
+def run_robot(args):
+    robot = os.path.join(APP, "robot", "robot.js")
+    if not os.path.exists(robot):
+        robot = os.path.join(SRC, "robot", "robot.js")
+    r = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", robot] + args)
+    for l in tail(os.path.join(STATE, "robot.log"), 6):
+        sys.stdout.write(l)
+    sys.exit(r.returncode)
+
+
+def cmd_serve(a):
+    cfg = load_config()
+    env = dict(os.environ, TQ_TOKEN=cfg["token"], TQ_DATA=os.path.join(SHARE, "data"),
+               TQ_PORT=str(cfg.get("port", 8765)), TQ_CONFIG=SERVER_CONFIG)
+    os.execve(sys.executable, [sys.executable, os.path.join(SRC, "server", "app.py")], env)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="tab-queue", description=__doc__.split("\n\n")[0])
+    p.add_argument("--version", action="version", version=VERSION)
+    sub = p.add_subparsers(dest="cmd")
+    i = sub.add_parser("install", help="set up the robot (and a local server)")
+    i.add_argument("--server", help="URL of a server you run elsewhere (e.g. your VPS). Default: local server")
+    i.add_argument("--token-file", help="file holding the robot token of that server")
+    i.add_argument("--public-url", help="base URL the phone uses, if different from --server")
+    i.add_argument("--port", type=int, help="local server port (default 8765)")
+    i.add_argument("--listen", help="local server address (default 127.0.0.1; 0.0.0.0 = other devices on your network)")
+    i.add_argument("--window", help='queue window: a Chrome window id, or "largest" (default)')
+    i.add_argument("--interval", type=int, help="seconds between robot runs (default 30)")
+    i.add_argument("--open-method", choices=["applescript", "open-g"], help="how to open tabs (default applescript)")
+    i.add_argument("--route", action="append", help="regex: new tabs matching it in other windows move to the queue"
+                   " (repeatable; default: local lavish pages)")
+    i.add_argument("--lang", help="page language for the local server: en (default) or pt")
+    i.add_argument("--rewrite", action="append", help="FROM=TO: rewrite links before the phone opens them")
+    i.add_argument("--link-bin", action="store_true", help="also put tab-queue in ~/.local/bin")
+    sub.add_parser("uninstall", help="remove the LaunchAgents")
+    s = sub.add_parser("status", help="show whether it works")
+    s.add_argument("-n", "--lines", type=int, default=8)
+    sub.add_parser("link", help="print the page link")
+    sub.add_parser("rotate-key", help="make a new page link")
+    sub.add_parser("send-front", help="move the front Chrome tab to the queue window")
+    sub.add_parser("once", help="run the robot once, verbose")
+    sub.add_parser("serve", help="run the local server in the foreground")
+    a = p.parse_args(argv)
+    if a.cmd == "install":
+        if a.route == [""]:
+            a.route = []
+        return cmd_install(a)
+    if a.cmd == "uninstall":
+        return cmd_uninstall(a)
+    if a.cmd == "status":
+        return cmd_status(a)
+    if a.cmd == "link":
+        return cmd_link(a)
+    if a.cmd == "rotate-key":
+        return cmd_rotate(a)
+    if a.cmd == "send-front":
+        return run_robot(["send-front"])
+    if a.cmd == "once":
+        return run_robot(["-v"])
+    if a.cmd == "serve":
+        return cmd_serve(a)
+    p.print_help()
+
+
+if __name__ == "__main__":
+    main()

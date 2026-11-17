@@ -1,0 +1,10 @@
+{
+  "lang": "en",
+  "title": "",
+  "undo_seconds": 10,
+  "order": "newest",
+  "lavish_match": ["^https?://(127\\.0\\.0\\.1|localhost):4387/session/"],
+  "rewrites": [
+    {"from": "http://127.0.0.1:4387/", "to": "https://lavish.example.com/"}
+  ]
+}

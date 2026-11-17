@@ -1,0 +1,15 @@
+{
+  "name": "tab-queue",
+  "description": "One Chrome window on your Mac becomes a queue on your phone. Done closes the tab on the Mac.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "tab-queue",
+      "source": "./",
+      "description": "One Chrome window on your Mac becomes a queue on your phone."
+    }
+  ]
+}
