@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test tests/core.test.js
+      - run: node --test tests/
       # robot tests skip here (they need macOS osascript); server and CLI tests run
       - run: python -m unittest discover -s tests -v
   docker:
@@ -31,6 +31,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: node --test tests/core.test.js
+      - run: node --test tests/
       # Apple's own python3 (3.9), the one the LaunchAgents use; robot tests drive a fake Chrome through osascript
       - run: /usr/bin/python3 -m unittest discover -s tests -v

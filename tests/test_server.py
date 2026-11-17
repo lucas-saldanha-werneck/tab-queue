@@ -150,6 +150,41 @@ class StoreTests(unittest.TestCase):
         self.clock.t += 11
         self.assertEqual(self.s.sync(tabs((2, PAGE), (3, PAGE)))["actions"][0]["tab_ids"], [2, 3])
 
+    def test_undo_after_close_was_sent_but_not_reported_reopens(self):
+        # the close action went out, the robot has not reported yet: the tab is gone or about to be
+        self.s.sync(tabs((2, PAGE)))
+        self.s.done(PAGE)
+        self.clock.t += 11
+        self.assertEqual(self.s.sync(tabs((2, PAGE)))["actions"][0]["op"], "close")
+        self.assertEqual(self.s.undo(PAGE), "reopening")
+        r = self.s.sync(tabs(), results=[{"op": "close", "url": PAGE, "result": "closed"}])
+        self.assertEqual([(a["op"], a["url"]) for a in r["actions"]], [("open", PAGE)])
+
+    def test_add_of_link_done_but_still_open_cancels_the_done(self):
+        self.s.sync(tabs((2, PAGE)))
+        self.s.done(PAGE)
+        self.assertEqual(self.s.add(PAGE), "already")
+        self.assertEqual(self.urls(), [PAGE])
+        self.assertEqual(self.s.items()["pending"], [])
+        self.clock.t += 60
+        self.assertEqual(self.s.sync(tabs((2, PAGE)))["actions"], [])  # no close, no open
+
+    def test_add_of_link_whose_close_was_sent_reopens(self):
+        self.s.sync(tabs((2, PAGE)))
+        self.s.done(PAGE)
+        self.clock.t += 11
+        self.s.sync(tabs((2, PAGE)))  # close sent
+        self.assertEqual(self.s.add(PAGE), "queued")
+        r = self.s.sync(tabs(), results=[{"op": "close", "url": PAGE, "result": "closed"}])
+        self.assertEqual([a["op"] for a in r["actions"]], ["open"])
+
+    def test_toast_never_outlasts_the_undo_window(self):
+        for undo in (1, 2, 3, 5, 10, 30):
+            self.s.settings["undo_seconds"] = undo
+            ms = self.s.items()["undo_toast_ms"]
+            self.assertLess(ms, undo * 1000, undo)
+            self.assertGreater(ms, 0)
+
     def test_add_link(self):
         self.assertEqual(self.s.add("ftp://x"), None)
         self.assertEqual(self.s.add(PAGE), "queued")

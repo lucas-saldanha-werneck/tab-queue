@@ -110,6 +110,61 @@ class CliTests(Base):
         self.cli("install")
         self.assertEqual(load(os.path.join(self.tmp, "cfg", "config.json"))["token"], cfg["token"])
 
+    def load_cli(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("tq_cli", os.path.join(ROOT, "bin", "tab-queue"))
+        spec = importlib.util.spec_from_loader("tq_cli", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    def test_local_link_follows_port_and_listen_of_the_last_install(self):
+        mod = self.load_cli()
+        self.cli("install", "--port", "9100")
+        cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
+        self.assertNotIn("public_url", cfg)  # nothing derived is frozen into the config
+        self.assertEqual(mod.page_link(cfg, "K"), "http://127.0.0.1:9100/K/")
+        self.cli("install", "--port", "9200", "--listen", "0.0.0.0")
+        cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
+        self.assertNotIn("public_url", cfg)
+        link = mod.page_link(cfg, "K")
+        self.assertRegex(link, r"^http://[^/:]+:9200/K/$")
+        self.assertNotIn("127.0.0.1", link)
+        self.assertNotIn("0.0.0.0", link)
+        self.cli("install")  # install again with no options: settings of the last install stay
+        cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
+        self.assertEqual((cfg["port"], cfg["listen"]), (9200, "0.0.0.0"))
+        self.cli("install", "--public-url", "https://q.example.com/")
+        cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
+        self.assertEqual(mod.page_link(cfg, "K"), "https://q.example.com/K/")
+
+    def test_launchctl_load_waits_for_the_job_to_leave(self):
+        from unittest import mock
+        mod = self.load_cli()
+        calls, state = [], {"loaded": 3, "boot_fail": 1}
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd[1])
+            r = mock.Mock(returncode=0, stdout="", stderr="")
+            if cmd[1] == "print":
+                if state["loaded"] > 0:
+                    state["loaded"] -= 1
+                else:
+                    r.returncode = 113
+            elif cmd[1] == "bootstrap":
+                if state["loaded"] > 0:
+                    self.fail("bootstrap while the old job was still loaded")
+                if state["boot_fail"]:
+                    state["boot_fail"] -= 1
+                    r.returncode, r.stderr = 5, "Bootstrap failed: 5: Input/output error"
+            return r
+        with mock.patch.object(mod, "NO_LAUNCHCTL", False), mock.patch.object(mod.subprocess, "run", fake_run), \
+                mock.patch.object(mod.time, "sleep"):
+            mod.launchctl_load("local.x", "/tmp/x.plist")
+        self.assertEqual(calls[0], "bootout")
+        self.assertEqual(calls.count("bootstrap"), 2)  # one failure, then it works
+
     def test_remote_without_token_refuses(self):
         r = self.cli("install", "--server", self.base, ok=False)
         self.assertNotEqual(r.returncode, 0)
@@ -230,6 +285,85 @@ class RobotTests(Base):
         self.assertEqual([w["id"] for w in self.chrome()["windows"]], [1])
         self.assertEqual(self.tabs(1), [YT, PAGE])
         self.assertIn("a new Chrome window", self.log())
+
+    def win(self, wid, *tabs, **kw):
+        return dict({"id": wid, "mode": "normal", "active": 1,
+                     "tabs": [{"id": wid * 10 + k, "url": u, "title": u} for k, u in enumerate(tabs)]}, **kw)
+
+    def test_foreign_new_window_during_open_is_left_alone(self):
+        # another automation opens windows in this Chrome: only a blank window made by OUR make may be closed
+        self.fake([self.win(1, YT, "https://b.example/")], foreign_window="https://x.com/")
+        self.robot()
+        self.phone("api/add", {"url": PAGE})
+        self.robot()
+        self.assertEqual(self.tabs(1), [YT, "https://b.example/", PAGE])
+        self.assertEqual([w["id"] for w in self.chrome()["windows"]], [1, 9601])
+        self.assertIn("not ours", self.log())
+
+    def test_window_that_existed_before_the_open_is_never_closed(self):
+        self.fake([self.win(1, YT, "https://b.example/", "https://c.example/"), self.win(2, "about:blank"), self.win(3, PAGE + "2")])
+        self.robot()
+        self.phone("api/add", {"url": PAGE})
+        self.robot()
+        self.assertEqual(self.tabs(1)[-1], PAGE)
+        self.assertEqual(self.tabs(2), ["about:blank"])
+        self.assertEqual(self.tabs(3), [PAGE + "2"])
+
+    def test_restart_does_not_move_lavish_tabs_of_other_windows(self):
+        self.fake([self.win(1, YT, "https://b.example/", "https://c.example/"), self.win(2, LAV + "old")], age=3600)
+        self.robot()
+        # Chrome restarted: every window and tab has a new id, the same pages are open
+        self.fake([self.win(7, YT, "https://b.example/", "https://c.example/"), self.win(8, LAV + "old")], age=200)
+        self.robot()
+        self.assertEqual(self.tabs(8), [LAV + "old"])
+        self.assertEqual(self.tabs(7), [YT, "https://b.example/", "https://c.example/"])
+        self.assertIn("moving nothing", self.log())
+        # the run after that is normal again: a lavish page that opens now does move
+        d = self.chrome()
+        d["windows"][1]["tabs"].append({"id": 999, "url": LAV + "new", "title": "n"})
+        dump(d, self.fake_path)
+        self.robot()
+        self.assertEqual(self.tabs(7)[-1], LAV + "new")
+        self.assertEqual(self.tabs(8), [LAV + "old"])
+
+    def set_open_method(self, m):
+        cfgp = os.path.join(self.tmp, "cfg", "config.json")
+        cfg = load(cfgp)
+        cfg["open_method"] = m
+        dump(cfg, cfgp)
+
+    def test_open_g_does_not_close_a_tab_the_user_already_had(self):
+        self.set_open_method("open-g")
+        mine = self.win(2, PAGE)
+        self.fake([mine, self.win(1, YT, "https://b.example/", "https://c.example/")], open_g_noop=True)
+        self.robot()
+        self.phone("api/add", {"url": PAGE})
+        self.robot()
+        self.assertEqual(self.tabs(2), [PAGE])  # the user's own tab is still there
+        self.assertNotIn(PAGE, self.tabs(1))
+        self.assertIn("NOT FOUND", self.log())
+
+    def test_open_g_adopts_the_tab_it_made(self):
+        self.set_open_method("open-g")
+        self.fake([self.win(2, "https://keep.example/"), self.win(1, YT, "https://b.example/", "https://c.example/")])
+        self.robot()
+        self.phone("api/add", {"url": PAGE})
+        self.robot()
+        self.assertEqual(self.tabs(1)[-1], PAGE)
+        self.assertEqual(self.tabs(2), ["https://keep.example/"])
+
+    def test_open_reads_all_windows_only_twice(self):
+        self.fake([self.win(1, YT, "https://b.example/"), self.win(2, "https://o.example/")])
+        self.robot()
+        self.phone("api/add", {"url": PAGE})
+        d = self.chrome()
+        d["reads_all"] = d["reads_q"] = 0
+        dump(d, self.fake_path)
+        self.robot()
+        d = self.chrome()
+        self.assertEqual(self.tabs(1)[-1], PAGE)
+        self.assertLessEqual(d["reads_all"], 2, d)  # choosing the window + looking at the other windows
+        self.assertGreaterEqual(d["reads_q"], 1)
 
     def test_open_code_never_makes_windows(self):
         src = read(os.path.join(ROOT, "robot", "robot.js"))

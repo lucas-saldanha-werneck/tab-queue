@@ -1,10 +1,25 @@
 // tab-queue robot: pure logic, no Chrome and no network. Loaded by robot.js (JXA, through eval)
 // and by the Node tests (require). Keep it plain ES5-compatible JavaScript.
 var TQCore = (function () {
+  function dec(v) {
+    try { return decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { return v; }
+  }
+  // value of ?k=... or &k=... up to the next & or #
   function param(u, k) {
-    var m = String(u).match(new RegExp('[?&]' + k + '=([^&#]*)'));
-    if (!m) return '';
-    try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) { return m[1]; }
+    var m = new RegExp('[?&]' + k + '=([^&#]*)').exec(String(u));
+    return m ? dec(m[1]) : '';
+  }
+
+  // The suspender's own url=/uri= is the first one in the string (the real address comes after it, so any
+  // url= inside the real address is further right). Encoded value: up to the next & or #. Value that starts
+  // with a scheme (not encoded): the real address itself, to the end of the string.
+  function target(u) {
+    u = String(u);
+    var m = /[?&](?:url|uri)=/.exec(u);
+    if (!m) return null;
+    var rest = u.slice(m.index + m[0].length);
+    var raw = /^[a-z][a-z0-9+.\-]*:\/\//i.test(rest) ? rest : rest.split(/[&#]/)[0];
+    return { value: /^[a-z][a-z0-9+.\-]*:\/\//i.test(rest) ? raw : dec(raw), head: u.slice(0, m.index + 1) };
   }
 
   // Tabs frozen by suspender extensions (e.g. Tab Suspender) show chrome-extension://<id>/park.html?...&url=<real>.
@@ -12,8 +27,8 @@ var TQCore = (function () {
   function realTab(url, title) {
     url = String(url || ''); title = String(title || '');
     if (url.indexOf('chrome-extension://') === 0 && /\/(park|suspended)\.html/.test(url)) {
-      var real = param(url, 'url') || param(url, 'uri');
-      if (real) return { url: real, title: param(url, 'title') || title, suspended: true };
+      var t = target(url);
+      if (t && t.value) return { url: t.value, title: param(t.head, 'title') || title, suspended: true };
     }
     return { url: url, title: title, suspended: false };
   }
@@ -114,16 +129,38 @@ var TQCore = (function () {
     return findOpen(url, fresh) || (fresh.length === 1 ? fresh[0] : null);
   }
 
-  // Windows present after an open that were not there before, holding only blank pages or the link just opened.
-  function strayWindows(before, after, url) {
-    var had = {};
-    (before || []).forEach(function (w) { had[String(w.id)] = 1; });
-    return (after || []).filter(function (w) {
-      if (had[String(w.id)]) return false;
-      return (w.tabs || []).every(function (t) {
-        return /^(about:blank|chrome:\/\/newtab\/?)$/.test(t.url || '') || sameLink(t.url, url);
-      });
+  // newWindows: [{id, tabs:[{id,url}]}], only windows that appeared during our own make-tab call.
+  // Ours to close only when the single tab is our link or about:blank; anything else belongs to someone else.
+  function strayWindows(newWindows, url) {
+    return (newWindows || []).filter(function (w) {
+      var tabs = w.tabs || [];
+      return tabs.length === 1 && (tabs[0].url === 'about:blank' || sameLink(tabs[0].url, url));
     });
+  }
+
+  // After "open -g": a tab with this link in another window, whose id did not exist before the open.
+  function pickAdopt(wins, queueId, url, hadIds) {
+    var had = {};
+    (hadIds || []).forEach(function (id) { had[String(id)] = 1; });
+    for (var i = 0; i < (wins || []).length; i++) {
+      if (String(wins[i].id) === String(queueId)) continue;
+      var tabs = wins[i].tabs || [];
+      for (var k = tabs.length - 1; k >= 0; k--) {
+        if (!had[String(tabs[k].id)] && sameLink(tabs[k].url, url)) return { window_id: wins[i].id, tab_id: tabs[k].id };
+      }
+    }
+    return null;
+  }
+
+  // Tab and window ids restart with Chrome, so what we saw last run says nothing about this run:
+  // then routing only records. startedAt: epoch seconds when this Chrome process started (null if unknown).
+  function restarted(state, pick, startedAt) {
+    state = state || {};
+    if (!state.other_seen || state.window_id === undefined || state.window_id === null) return true;
+    if (!pick || (pick.reason !== 'config' && pick.reason !== 'last')) return true;
+    if (startedAt !== null && startedAt !== undefined && state.chrome_started !== undefined &&
+        Math.abs(startedAt - state.chrome_started) > 120) return true;
+    return false;
   }
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -133,6 +170,6 @@ var TQCore = (function () {
   }
 
   return { param: param, realTab: realTab, parseEtime: parseEtime, matchesAny: matchesAny, pickWindow: pickWindow,
-    planClose: planClose, planRoute: planRoute, sameLink: sameLink, findOpen: findOpen, newTab: newTab, strayWindows: strayWindows, stamp: stamp };
+    planClose: planClose, planRoute: planRoute, sameLink: sameLink, findOpen: findOpen, newTab: newTab, strayWindows: strayWindows, pickAdopt: pickAdopt, restarted: restarted, stamp: stamp };
 })();
 if (typeof module !== 'undefined') module.exports = TQCore;

@@ -121,7 +121,7 @@ function render(){
    <button class="btn done" type="button">${L.done}</button></div></div></li>`).join('');
  $('empty').hidden=shown.length+pend.length>0;}
 async function load(){
- try{data=await api('items');undoMs=Math.max(3000,((data.undo_seconds||10)-2)*1000);render();
+ try{data=await api('items');undoMs=data.undo_toast_ms||Math.round((data.undo_seconds||10)*500);render();
   const ago=data.mac_seen_ago;const u=$('upd');
   if(ago!=null&&ago>150){u.textContent=L.mac+' '+Math.round(ago/60)+' '+L.ago;u.className='warn';}
   else{u.textContent=L.updated+' '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});u.className='';}}
@@ -132,6 +132,7 @@ $('list').addEventListener('click',async e=>{
  busy.add(url);li.classList.add('out');
  try{const r=await api('done',{url});if(!r.ok)throw 0;}
  catch(err){busy.delete(url);li.classList.remove('out');toast(L.failed,false);return;}
+ data.items=data.items.filter(i=>i.url!==url); // gone for good: do not let the next render bring it back
  setTimeout(render,250);if(last&&last!==url)busy.delete(last);last=url;toast(L.closed,true);});
 $('undo').onclick=async()=>{if(!last)return;const u=last;last=null;$('toast').style.display='none';
  try{const r=await api('undo',{url:u});busy.delete(u);toast(r.result==='reopening'?L.reopen:L.kept,false);}catch(e){busy.delete(u);toast(L.failed,false);}

@@ -60,6 +60,7 @@ function run(argv) {
     var chrome = getenv('TQ_FAKE_CHROME') ? fakeChrome(getenv('TQ_FAKE_CHROME')) : realChrome(cfg.chrome_app || 'Google Chrome');
     if (!chrome.running()) { if (verbose) log('Chrome is not running'); return; }
     var age = chrome.ageSeconds();
+    var startedAt = age === null ? null : Date.now() / 1000 - age; // when this Chrome process started
     if (age !== null && age < (cfg.min_chrome_age || 90)) { log('Chrome started ' + age + ' s ago, waiting'); return; }
 
     var wins = chrome.windows();
@@ -70,26 +71,34 @@ function run(argv) {
     var Q = pick.id;
     if (String(Q) !== String(state.window_id)) log('queue window ' + Q + ' (' + pick.reason + ')');
 
-    function queueTabs() {
-      var w = chrome.windows().filter(function (x) { return String(x.id) === String(Q); })[0];
-      return (w ? w.tabs : []).map(function (t) { var r = C.realTab(t.url, t.title); return { id: t.id, url: r.url, title: r.title }; });
+    // tabs of the queue window only (one batch read of that window), url already real; null if the window is gone
+    function readQueue() {
+      var tabs = chrome.windowTabs(Q);
+      if (!tabs) return null;
+      return tabs.map(function (t) { var r = C.realTab(t.url, t.title); return { id: t.id, url: r.url, title: r.title }; });
     }
+    function queueTabs() { return readQueue() || []; }
 
     // Open a link as a new tab at the end of the queue window, without taking the screen. Returns {result, tab_id}.
     function openInQueue(url) {
-      var winsBefore = chrome.windows();
-      if (!winsBefore.some(function (w) { return String(w.id) === String(Q); })) {
+      var before = readQueue();
+      if (before === null) {
         log('open ' + url + ': queue window ' + Q + ' is gone, not opening anything');
         return { result: 'no-queue-window' };
       }
-      var before = queueTabs();
       var had = C.findOpen(url, before);
       if (had) return { result: 'already-open', tab_id: had.id };
       var method = cfg.open_method || 'applescript';
       var front0 = chrome.frontApp();
       var t0 = Date.now();
+      var newWindowIds = [];
+      var hadIds = null; // open-g: every tab id that exists now, so only a tab that appears later gets adopted
+      if (method === 'open-g') {
+        hadIds = [];
+        chrome.windows().forEach(function (w) { w.tabs.forEach(function (t) { hadIds.push(t.id); }); });
+      }
       try {
-        if (method === 'applescript') chrome.openTab(Q, url);
+        if (method === 'applescript') newWindowIds = chrome.openTab(Q, url);
         else if (method === 'open-g') chrome.openBackground(url);
         else return { result: 'unsupported open_method ' + method };
       } catch (e) {
@@ -100,7 +109,7 @@ function run(argv) {
       for (var i = 0; i < 20 && !tab; i++) {
         if (i) delay(0.25);
         tab = C.newTab(before.map(function (t) { return t.id; }), queueTabs(), url);
-        if (!tab && method === 'open-g') tab = chrome.adoptNewTab(url, Q);
+        if (!tab && method === 'open-g') chrome.adoptNewTab(url, Q, hadIds);
       }
       // a "make new tab" can leave an empty New Tab behind: close it if it is one we just made
       var ids = {}; before.forEach(function (t) { ids[String(t.id)] = 1; });
@@ -109,10 +118,16 @@ function run(argv) {
           chrome.closeTab(Q, t.id); log('closed stray New Tab ' + t.id);
         }
       });
-      // never leave a new Chrome window behind: close one that appeared and holds only blank pages or this link
-      C.strayWindows(winsBefore, chrome.windows(), url).forEach(function (w) {
-        log('a new Chrome window ' + w.id + ' appeared after the open; closing its ' + w.tabs.length + ' blank tab(s)');
-        w.tabs.forEach(function (t) { chrome.closeTab(w.id, t.id); });
+      // a window that appeared DURING our own make-tab call (the call reports which) and holds only our link or
+      // about:blank is ours: close it. Any other new window belongs to someone else (other automations open
+      // windows too): leave it and only write it in the log.
+      var born = (newWindowIds || []).map(function (id) { return { id: id, tabs: chrome.windowTabs(id) || [] }; });
+      var mine = C.strayWindows(born, url);
+      born.forEach(function (w) {
+        if (mine.indexOf(w) >= 0) {
+          log('a new Chrome window ' + w.id + ' appeared during the open and holds only our page; closing it');
+          w.tabs.forEach(function (t) { chrome.closeTab(w.id, t.id); });
+        } else log('a new Chrome window ' + w.id + ' appeared during the open but is not ours (' + w.tabs.length + ' tab(s)); left alone');
       });
       var front1 = chrome.frontApp();
       log('open ' + url + ' -> ' + (tab ? 'tab ' + tab.id : 'NOT FOUND') + ' in ' + ((Date.now() - t0) / 1000).toFixed(1) +
@@ -125,8 +140,8 @@ function run(argv) {
     function moveToQueue(t) {
       var r = openInQueue(t.url);
       if (r.result !== 'opened' && r.result !== 'already-open') { log('move failed for ' + t.url + ': ' + r.result); return false; }
-      var w = chrome.windows().filter(function (x) { return String(x.id) === String(t.window_id); })[0];
-      var still = w && w.tabs.filter(function (x) { return String(x.id) === String(t.id); })[0];
+      var wt = chrome.windowTabs(t.window_id);
+      var still = wt && wt.filter(function (x) { return String(x.id) === String(t.id); })[0];
       if (still && C.realTab(still.url, still.title).url === t.url) {
         chrome.closeTab(t.window_id, t.id);
         log('moved ' + t.url + ' from window ' + t.window_id + ' to the queue');
@@ -154,7 +169,10 @@ function run(argv) {
 
     // pages matching route_to_queue that opened in another window since the last run go to the queue window
     var others = otherTabs();
-    var routed = C.planRoute(others, state.other_seen || null, routes);
+    // (ids change when Chrome restarts, so on the first run after a restart it only records what is open)
+    var routed = [];
+    if (C.restarted(state, pick, startedAt)) { if (state.other_seen) log('Chrome restarted or the queue window changed: recording the other windows, moving nothing'); }
+    else routed = C.planRoute(others, state.other_seen, routes);
     routed.forEach(moveToQueue);
     if (routed.length) others = otherTabs();
     var seen = {}; others.forEach(function (t) { seen[String(t.id)] = 1; });
@@ -196,7 +214,8 @@ function run(argv) {
     }
 
     var urls = tabs.map(function (t) { return t.url; }).slice(0, 300);
-    writeFile(statePath, JSON.stringify({ window_id: Q, urls: urls, other_seen: seen, at: C.stamp(new Date()) }));
+    writeFile(statePath, JSON.stringify({ window_id: Q, urls: urls, other_seen: seen,
+      chrome_started: startedAt === null ? state.chrome_started : Math.round(startedAt), at: C.stamp(new Date()) }));
     if (verbose) log('sync: ' + tabs.length + ' tabs in window ' + Q);
   } catch (e) {
     log('ERROR ' + String(e).slice(0, 300));
@@ -224,31 +243,39 @@ function run(argv) {
         }
         return out;
       },
+      windowIds: function () { return c.windows.id().map(Number); },
+      // id, url and title of every tab of one window, 3 batch reads; null if the window does not exist
+      windowTabs: function (wid) {
+        try {
+          var w = c.windows.byId(+wid), tids = w.tabs.id(), urls = w.tabs.url(), titles = w.tabs.title(), tabs = [];
+          for (var k = 0; k < tids.length; k++) tabs.push({ id: +tids[k], url: urls[k], title: titles[k] });
+          return tabs;
+        } catch (e) { return null; }
+      },
       closeTab: function (wid, tid) { c.windows.byId(+wid).tabs.byId(+tid).close(); },
       // one osascript process: remember the front app, make the tab, give the screen back at once
-      // (measured: Chrome in front for under 0.6 s; a separate call left it in front for seconds)
+      // (measured: Chrome in front for under 0.6 s; a separate call left it in front for seconds).
+      // Returns the ids of windows that appeared between the lines right before and right after the make.
       openTab: function (wid, url) {
-        var src = 'set p to ""\n' +
+        var src = 'set p to ""\nset idsBefore to {}\nset idsAfter to {}\n' +
           'try\ntell application "System Events" to set p to name of first process whose frontmost is true\nend try\n' +
           'tell application ' + asStr(name) + '\n' +
           'if not (exists window id ' + (+wid) + ') then error "queue window missing"\n' +
+          'set idsBefore to id of every window\n' +
           'make new tab at end of tabs of window id ' + (+wid) + ' with properties {URL:' + asStr(url) + '}\n' +
+          'set idsAfter to id of every window\n' +
           'end tell\n' +
-          'if p is not "" and p is not ' + asStr(name) + ' then\ntry\ntell application p to activate\nend try\nend if';
-        sh('/usr/bin/osascript -e ' + q(src));
+          'if p is not "" and p is not ' + asStr(name) + ' then\ntry\ntell application p to activate\nend try\nend if\n' +
+          'set born to ""\nrepeat with i in idsAfter\nif idsBefore does not contain (contents of i) then set born to born & (contents of i) & ","\nend repeat\nreturn born';
+        var out = sh('/usr/bin/osascript -e ' + q(src));
+        return String(out).split(',').filter(function (x) { return /^\d+$/.test(x.trim()); }).map(Number);
       },
       openBackground: function (url) { sh('open -g -a ' + q(name) + ' ' + q(url)); },
-      // after "open -g" the tab lands in Chrome's last active window: bring it to the queue window
-      adoptNewTab: function (url, wid) {
-        var ws = this.windows();
-        for (var i = 0; i < ws.length; i++) {
-          if (String(ws[i].id) === String(wid)) continue;
-          for (var k = ws[i].tabs.length - 1; k >= 0; k--) {
-            var t = ws[i].tabs[k];
-            if (C.sameLink(t.url, url)) { this.openTab(wid, url); this.closeTab(ws[i].id, t.id); return null; }
-          }
-        }
-        return null;
+      // after "open -g" the tab lands in Chrome's last active window: bring it to the queue window.
+      // Only a tab whose id did not exist before the open (hadIds) is ours; one the user already had stays.
+      adoptNewTab: function (url, wid, hadIds) {
+        var f = C.pickAdopt(this.windows(), wid, url, hadIds);
+        if (f) { this.openTab(wid, url); this.closeTab(f.window_id, f.tab_id); }
       },
       frontApp: function () {
         ObjC.import('AppKit');
@@ -262,10 +289,17 @@ function run(argv) {
   function fakeChrome(path) {
     function load() { return JSON.parse(readFile(path)); }
     function save(d) { writeFile(path, JSON.stringify(d, null, 1)); }
+    function count(k) { var d = load(); d[k] = (d[k] || 0) + 1; save(d); }
     return {
       running: function () { return load().running !== false; },
       ageSeconds: function () { var a = load().age; return a === undefined ? 3600 : a; },
-      windows: function () { return load().windows; },
+      windows: function () { count('reads_all'); return load().windows; },
+      windowIds: function () { return load().windows.map(function (w) { return w.id; }); },
+      windowTabs: function (wid) {
+        count('reads_q');
+        var w = load().windows.filter(function (x) { return String(x.id) === String(wid); })[0];
+        return w ? w.tabs : null;
+      },
       closeTab: function (wid, tid) {
         var d = load();
         d.windows.forEach(function (w) {
@@ -275,17 +309,30 @@ function run(argv) {
         (d.log = d.log || []).push('close ' + tid);
         save(d);
       },
+      // returns the ids of the windows that appeared during the call, like the real one
       openTab: function (wid, url) {
-        var d = load();
+        var d = load(), born = [];
         if (!d.windows.some(function (w) { return String(w.id) === String(wid); })) throw new Error('queue window missing');
         d.next_id = (d.next_id || 9000) + 1;
-        if (d.make_creates_window) d.windows.push({ id: d.next_id + 500, mode: 'normal', active: 1, tabs: [{ id: d.next_id + 501, url: 'about:blank', title: '' }] });
+        if (d.make_creates_window) { born.push(d.next_id + 500); d.windows.push({ id: d.next_id + 500, mode: 'normal', active: 1, tabs: [{ id: d.next_id + 501, url: 'about:blank', title: '' }] }); }
+        if (d.foreign_window) { born.push(d.next_id + 600); d.windows.push({ id: d.next_id + 600, mode: 'normal', active: 1, tabs: [{ id: d.next_id + 601, url: d.foreign_window, title: '' }] }); }
         d.windows.forEach(function (w) { if (String(w.id) === String(wid)) w.tabs.push({ id: d.next_id, url: url, title: url }); });
         (d.log = d.log || []).push('open ' + url);
         save(d);
+        return born;
       },
-      openBackground: function (url) { this.openTab(load().windows[0].id, url); },
-      adoptNewTab: function () { return null; },
+      // open -g: the tab lands in the first (front) window, unless the fake says Chrome did nothing
+      openBackground: function (url) {
+        if (load().open_g_noop) return;
+        var d = load();
+        d.next_id = (d.next_id || 9000) + 1;
+        d.windows[0].tabs.push({ id: d.next_id, url: url, title: url });
+        save(d);
+      },
+      adoptNewTab: function (url, wid, hadIds) {
+        var f = C.pickAdopt(this.windows(), wid, url, hadIds);
+        if (f) { this.openTab(wid, url); this.closeTab(f.window_id, f.tab_id); }
+      },
       frontApp: function () { return load().front || 'Finder'; }
     };
   }

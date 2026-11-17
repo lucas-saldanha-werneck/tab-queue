@@ -131,6 +131,11 @@ def oembed(url):
 
 # ---------- store ----------
 
+def undo_toast_ms(undo_seconds):
+    u = float(undo_seconds) * 1000
+    return int(max(u / 2, u - 2000))
+
+
 class Store:
     """All state. Every method takes the lock; SQLite is opened per call (safe across threads)."""
 
@@ -290,7 +295,9 @@ class Store:
         last = self.get_meta("last_sync")
         return {"items": out, "pending": pending, "counts": counts,
                 "mac_seen_ago": (now - float(last)) if last else None,
-                "undo_seconds": self.settings.get("undo_seconds", 10)}
+                "undo_seconds": self.settings.get("undo_seconds", 10),
+                # how long the page shows its Undo button: always inside the server's Undo window
+                "undo_toast_ms": undo_toast_ms(self.settings.get("undo_seconds", 10))}
 
     def done(self, url):
         with self.lock, self.db() as c:
@@ -299,28 +306,39 @@ class Store:
         return n > 0
 
     def undo(self, url):
-        """Done by mistake. Before the robot closed the tab: cancel. After: ask the robot to open it again."""
+        """Done by mistake. If no close was sent to the robot yet: cancel. Otherwise the tab is gone or about to
+        be (the robot may not have reported yet): ask the robot to open it again."""
         with self.lock, self.db() as c:
-            r = c.execute("SELECT * FROM items WHERE url=?", (url,)).fetchone()
-            if r is None or r["done_at"] is None:
-                return "nothing"
-            if r["on_mac"]:
-                c.execute("UPDATE items SET done_at=NULL, close_sent_at=NULL WHERE url=?", (url,))
-                return "kept"
+            return self._undo(c, url)
+
+    def _undo(self, c, url):
+        r = c.execute("SELECT * FROM items WHERE url=?", (url,)).fetchone()
+        if r is None or r["done_at"] is None:
+            return "nothing"
+        if r["on_mac"] and r["close_sent_at"] is None:
             c.execute("UPDATE items SET done_at=NULL WHERE url=?", (url,))
-        self.add(url, reason="undo")
+            return "kept"
+        c.execute("UPDATE items SET done_at=NULL, close_sent_at=NULL WHERE url=?", (url,))
+        self._queue_open(c, url, "undo")
         return "reopening"
+
+    def _queue_open(self, c, url, reason):
+        if not c.execute("SELECT 1 FROM opens WHERE url=? AND finished_at IS NULL", (url,)).fetchone():
+            c.execute("INSERT INTO opens(url,reason,created) VALUES(?,?,?)", (url, reason, self.clock()))
 
     def add(self, url, reason="phone"):
         if not valid_url(url):
             return None
         with self.lock, self.db() as c:
             r = c.execute("SELECT on_mac, done_at FROM items WHERE url=?", (url,)).fetchone()
-            if r is not None and r["on_mac"] and r["done_at"] is None:
+            if r is not None and r["on_mac"] and r["done_at"] is not None:
+                # marked Done but still open: cancel the Done (like an Undo) instead of queueing an open
+                return "already" if self._undo(c, url) == "kept" else "queued"
+            if r is not None and r["on_mac"]:
                 return "already"
             if c.execute("SELECT 1 FROM opens WHERE url=? AND finished_at IS NULL", (url,)).fetchone():
                 return "already"
-            c.execute("INSERT INTO opens(url,reason,created) VALUES(?,?,?)", (url, reason, self.clock()))
+            self._queue_open(c, url, reason)
         return "queued"
 
 

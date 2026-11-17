@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import shutil
 import subprocess
 import sys
@@ -97,9 +98,18 @@ def launchctl_load(label, path):
         return
     dom = "gui/%d" % os.getuid()
     subprocess.run(["launchctl", "bootout", dom + "/" + label], capture_output=True)
-    r = subprocess.run(["launchctl", "bootstrap", dom, path], capture_output=True, text=True)
-    if r.returncode:
-        die("launchctl bootstrap %s failed: %s" % (label, r.stderr.strip()))
+    # bootout returns before the job is gone; bootstrap right after it fails with "5: Input/output error"
+    for _ in range(50):
+        if subprocess.run(["launchctl", "print", dom + "/" + label], capture_output=True).returncode:
+            break
+        time.sleep(0.2)
+    r = None
+    for attempt in range(5):
+        r = subprocess.run(["launchctl", "bootstrap", dom, path], capture_output=True, text=True)
+        if not r.returncode:
+            return
+        time.sleep(0.5 * (attempt + 1))
+    die("launchctl bootstrap %s failed: %s" % (label, r.stderr.strip()))
 
 
 def launchctl_state(label):
@@ -148,10 +158,10 @@ def cmd_install(a):
     server = "http://127.0.0.1:%d" % port if local else (a.server or old["server"])
     cfg = {
         "server": server.rstrip("/"),
-        "public_url": (a.public_url or a.server or old.get("public_url") or server).rstrip("/"),
         "token": token,
         "local": local,
         "port": port,
+        "listen": a.listen or old.get("listen") or "127.0.0.1",
         "window": a.window if a.window is not None else old.get("window", "largest"),
         "interval": a.interval or old.get("interval", 30),
         "open_method": a.open_method or old.get("open_method", "applescript"),
@@ -160,6 +170,10 @@ def cmd_install(a):
     }
     if isinstance(cfg["window"], str) and cfg["window"].isdigit():
         cfg["window"] = int(cfg["window"])
+    # public_url is stored only when the user gave one; otherwise the link is worked out when it is printed
+    public = a.public_url or (None if a.server and a.server.rstrip("/") != old.get("server") else old.get("public_url"))
+    if public:
+        cfg["public_url"] = public.rstrip("/")
     write_private(CONFIG, json.dumps(cfg, indent=2) + "\n")
     copy_app()
     os.makedirs(STATE, exist_ok=True)
@@ -178,7 +192,7 @@ def cmd_install(a):
             scfg["rewrites"] = [x for x in scfg["rewrites"] if x.get("from") != src] + [{"from": src, "to": dst}]
         write_private(SERVER_CONFIG, json.dumps(scfg, indent=2) + "\n")
         env = {"TQ_TOKEN": token, "TQ_DATA": os.path.join(SHARE, "data"), "TQ_PORT": str(port),
-               "TQ_HOST": a.listen or "127.0.0.1", "TQ_CONFIG": SERVER_CONFIG}
+               "TQ_HOST": cfg["listen"], "TQ_CONFIG": SERVER_CONFIG}
         sp = os.path.join(AGENTS, SERVER_LABEL + ".plist")
         write_private(sp, plist(SERVER_LABEL, ["/usr/bin/python3", os.path.join(APP, "server", "app.py")], env=env,
                                 keepalive=True, log=os.path.join(STATE, "server.log")))
@@ -211,8 +225,41 @@ def cmd_uninstall(a):
     print("Config (%s) and data (%s) were kept." % (CONFIG_DIR, SHARE))
 
 
+def lan_host():
+    """The name or address other devices on the network can use to reach this Mac."""
+    try:
+        r = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip() + ".local"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; it only picks the outgoing interface
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return socket.gethostname()
+
+
+def base_url(cfg):
+    """Where the phone reaches the server: the stored public_url, else worked out from the current config."""
+    if cfg.get("public_url"):
+        return cfg["public_url"].rstrip("/")
+    if not cfg.get("local", True):
+        return cfg["server"].rstrip("/")
+    listen = cfg.get("listen") or "127.0.0.1"
+    host = lan_host() if listen in ("0.0.0.0", "::") else listen
+    return "http://%s:%d" % (host, cfg.get("port", 8765))
+
+
 def page_link(cfg, key):
-    return "%s/%s/" % (cfg.get("public_url") or cfg["server"], key)
+    return "%s/%s/" % (base_url(cfg), key)
 
 
 def save_link(link):

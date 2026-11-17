@@ -88,8 +88,10 @@ changes after a Chrome restart, the robot finds the window that holds the same t
 
 ## Configuration
 
-`~/.config/tab-queue/config.json` (robot): `server`, `public_url`, `token`, `window`, `interval`, `open_method`,
-`route_to_queue`, `chrome_app`.
+`~/.config/tab-queue/config.json` (robot): `server`, `listen`, `port`, `token`, `window`, `interval`, `open_method`,
+`route_to_queue`, `chrome_app`, and `public_url` only if you passed `--public-url`. Without it, `tab-queue link`
+works the address out each time (the remote server, or this Mac's address and port; with `--listen 0.0.0.0` the
+`.local` name of the Mac), so a new `--port` or `--listen` shows up in the link.
 
 Server settings come from environment variables or a JSON file named by `TQ_CONFIG`
 (see [server/server.example.json](server/server.example.json)):
