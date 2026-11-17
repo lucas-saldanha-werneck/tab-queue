@@ -1,0 +1,36 @@
+name: test
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/core.test.js
+      # robot tests skip here (they need macOS osascript); server and CLI tests run
+      - run: python -m unittest discover -s tests -v
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t tab-queue server
+      - run: |
+          docker run -d --name tq -p 18080:8080 -e TQ_TOKEN="$(openssl rand -hex 24)" tab-queue
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18080/health && exit 0; sleep 1; done
+          docker logs tq; exit 1
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --test tests/core.test.js
+      # Apple's own python3 (3.9), the one the LaunchAgents use; robot tests drive a fake Chrome through osascript
+      - run: /usr/bin/python3 -m unittest discover -s tests -v

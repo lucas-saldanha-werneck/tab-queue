@@ -1,0 +1,21 @@
+# Copy to docker-compose.yml next to app.py, page.html and Dockerfile, then: docker compose up -d --build
+# .env must hold TQ_TOKEN=<long random string> (the robot's password; e.g. openssl rand -hex 24).
+services:
+  tab-queue:
+    build: .
+    container_name: tab-queue
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TQ_CONFIG: /data/server.json   # optional: lang, rewrites, lavish_match (see server.example.json)
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8080:8080"        # put a TLS reverse proxy (Caddy, Traefik, nginx) in front
+    # Traefik example instead of ports:
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.tabqueue.rule=Host(`queue.example.com`)"
+    #   - "traefik.http.routers.tabqueue.entrypoints=websecure"
+    #   - "traefik.http.routers.tabqueue.tls.certresolver=letsencrypt"
+    #   - "traefik.http.services.tabqueue.loadbalancer.server.port=8080"
