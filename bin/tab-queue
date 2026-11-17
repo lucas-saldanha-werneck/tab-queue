@@ -23,7 +23,7 @@ import sys
 import time
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SRC = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.environ.get("TQ_CONFIG_DIR", os.path.join(HOME, ".config", "tab-queue"))
@@ -258,8 +258,10 @@ def base_url(cfg):
     return "http://%s:%d" % (host, cfg.get("port", 8765))
 
 
-def page_link(cfg, key):
-    return "%s/%s/" % (base_url(cfg), key)
+def page_link(cfg, info):
+    if info.get("key_in_link") is False:
+        return "%s/" % base_url(cfg)
+    return "%s/%s/" % (base_url(cfg), info["key"])
 
 
 def save_link(link):
@@ -272,7 +274,7 @@ def cmd_link(a):
         info = http(cfg, "GET", "/api/robot/info")
     except Exception as e:
         die("Server %s did not answer: %s" % (cfg["server"], e))
-    link = page_link(cfg, info["key"])
+    link = page_link(cfg, info)
     save_link(link)
     print(link)
 
@@ -283,7 +285,7 @@ def cmd_rotate(a):
         info = http(cfg, "POST", "/api/robot/rotate-key", {})
     except Exception as e:
         die("Server %s did not answer: %s" % (cfg["server"], e))
-    link = page_link(cfg, info["key"])
+    link = page_link(cfg, info)
     save_link(link)
     print("New link (the old one now answers 404):")
     print(link)
