@@ -6,7 +6,7 @@
 // Config: ~/.config/tab-queue/config.json (or $TQ_CONFIG_FILE). Log: ~/.local/state/tab-queue/robot.log
 ObjC.import('Foundation');
 
-var ROBOT_VERSION = '0.1.0';
+var ROBOT_VERSION = '0.2.0';
 
 function run(argv) {
   argv = argv || [];

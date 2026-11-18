@@ -1,6 +1,6 @@
 {
   "name": "tab-queue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One Chrome window on your Mac becomes a queue on your phone. Done closes the tab on the Mac.",
   "author": {
     "name": "Lucas Saldanha Werneck",
