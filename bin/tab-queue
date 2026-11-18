@@ -287,7 +287,10 @@ def cmd_rotate(a):
         die("Server %s did not answer: %s" % (cfg["server"], e))
     link = page_link(cfg, info)
     save_link(link)
-    print("New link (the old one now answers 404):")
+    if info.get("key_in_link") is False:
+        print("New key. The page also opens with no key (key_in_link is off), so only your login protects it:")
+    else:
+        print("New link (the old one now answers 404):")
     print(link)
 
 

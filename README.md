@@ -135,7 +135,8 @@ The robot logs the front app before and after each open (`front app before=… a
 - It does nothing while Chrome is closed or started less than 90 s ago (session restore).
 - Anyone with the page link can see your tab titles and close tabs. Use HTTPS, and `tab-queue rotate-key` if it leaks.
 - Turn off `key_in_link` only when a login in front of the server (Cloudflare Access, Tailscale, a VPN) already keeps
-  strangers out. Behind Cloudflare Access, let `/api/robot` bypass the login: the robot signs in with its token.
+  strangers out. Behind Cloudflare Access, let only `/api/robot` bypass the login (not `/api`): the robot signs in
+  with its token. With the key off, `rotate-key` no longer protects the page; only the login does.
 - Pages that need a login (LinkedIn, claude.ai…) open on the phone only if you are logged in there.
 
 See [SECURITY.md](SECURITY.md) for what the tool reads, stores and sends.

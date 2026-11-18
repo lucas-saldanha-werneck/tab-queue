@@ -63,6 +63,8 @@ def load_settings(env=None):
         s["oembed"] = False
     if env.get("TQ_KEY_IN_LINK") in ("0", "false", "no"):
         s["key_in_link"] = False
+    if not isinstance(s.get("key_in_link"), bool):
+        raise SystemExit("key_in_link must be true or false, got %r" % (s.get("key_in_link"),))
     return s
 
 
@@ -373,6 +375,11 @@ def save_key(data_dir, k):
 
 # ---------- HTTP ----------
 
+def same(a, b):
+    """Constant-time compare that never raises (the request line may hold non-ASCII bytes)."""
+    return hmac.compare_digest(a.encode("utf-8", "surrogateescape"), b.encode("utf-8", "surrogateescape"))
+
+
 def make_handler(app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "tab-queue"
@@ -409,14 +416,14 @@ def make_handler(app):
                 return {}
 
         def robot_ok(self):
-            return hmac.compare_digest(self.headers.get("X-Token", ""), app.token)
+            return same(self.headers.get("X-Token", ""), app.token)
 
         def split_key(self):
             """'/<key>/rest' -> 'rest' when the key matches, else None.
             With key_in_link off, '/rest' -> 'rest' too (the keyed link keeps working)."""
             path = urlparse(self.path).path
             parts = path.split("/", 2)
-            if len(parts) >= 2 and parts[1] and hmac.compare_digest(parts[1], app.key):
+            if len(parts) >= 2 and parts[1] and same(parts[1], app.key):
                 return parts[2] if len(parts) > 2 else None
             if not app.open_root:
                 return None
@@ -433,7 +440,7 @@ def make_handler(app):
                 return self.send(200, {"key": app.key, "key_in_link": not app.open_root, "version": VERSION, "last_sync": float(last) if last else None,
                                        "items": app.store.items()["counts"]["all"]})
             parts = path.split("/")
-            if len(parts) == 2 and parts[1] and hmac.compare_digest(parts[1], app.key):
+            if len(parts) == 2 and parts[1] and same(parts[1], app.key):
                 self.send_response(301)
                 self.send_header("Location", "/%s/" % app.key)
                 self.end_headers()
@@ -463,7 +470,7 @@ def make_handler(app):
                                                          b.get("window_id"), b.get("version")))
                 if path == "/api/robot/rotate-key":
                     app.rotate_key()
-                    return self.send(200, {"key": app.key})
+                    return self.send(200, {"key": app.key, "key_in_link": not app.open_root})
                 return self.send(404, {"error": "not found"})
             rest = self.split_key()
             if rest is None:
