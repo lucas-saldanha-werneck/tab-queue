@@ -26,3 +26,6 @@ Only the latest release is supported.
   `~/.local/state/tab-queue/`. The local server LaunchAgent holds the token in its plist (mode 600).
 - **The page link** is the only protection of the page: anyone with it can see your tab titles, close tabs and open
   links on your Mac. Serve it over HTTPS and rotate it with `tab-queue rotate-key` if it leaks.
+- **`key_in_link` off** (`TQ_KEY_IN_LINK=0`): the page and its `/api/items|add|done|undo` answer at `/` with no key, so
+  the login in front of the server is then the only protection and `rotate-key` no longer helps. Protect the whole
+  host and let only `/api/robot` bypass the login (not `/api`), since the robot signs in with its token.

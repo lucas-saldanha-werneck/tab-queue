@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/tab-queue/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/tab-queue/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/tab-queue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](CHANGELOG.md)
 
 One Chrome window on your Mac becomes a queue you can see from your phone or another computer. You watch, read or
 reply, then tap **Done**, and the tab closes on the Mac. A link you send from the phone opens on the Mac in the
@@ -107,6 +107,7 @@ Server settings come from environment variables or a JSON file named by `TQ_CONF
 | what counts as lavish (regex list) | `TQ_LAVISH_MATCH` / `lavish_match` | `127.0.0.1:4387/session/` |
 | order: `newest` or `window` | `order` | `newest` |
 | YouTube channel names (youtube.com/oembed) | `TQ_OEMBED=0` turns off / `oembed` | on |
+| key in the page link (off: page also at `/`) | `TQ_KEY_IN_LINK=0` turns off / `key_in_link` | on |
 
 The secret key is created on first start and kept in `<data>/key` (mode 600). `TQ_KEY` sets the first one.
 
@@ -133,6 +134,9 @@ The robot logs the front app before and after each open (`front app before=… a
   restart ids change; the server finds tabs by address and sends the new ids on the next run.
 - It does nothing while Chrome is closed or started less than 90 s ago (session restore).
 - Anyone with the page link can see your tab titles and close tabs. Use HTTPS, and `tab-queue rotate-key` if it leaks.
+- Turn off `key_in_link` only when a login in front of the server (Cloudflare Access, Tailscale, a VPN) already keeps
+  strangers out. Behind Cloudflare Access, let only `/api/robot` bypass the login (not `/api`): the robot signs in
+  with its token. With the key off, `rotate-key` no longer protects the page; only the login does.
 - Pages that need a login (LinkedIn, claude.ai…) open on the phone only if you are logged in there.
 
 See [SECURITY.md](SECURITY.md) for what the tool reads, stores and sends.

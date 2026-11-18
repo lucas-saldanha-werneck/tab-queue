@@ -271,6 +271,42 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn("__TQ_CONFIG__", page)
         self.assertEqual(self.req("GET", "/%s/manifest.json" % self.app.key)[0], 200)
 
+    def restart(self, env):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.app = app.App(self.dir.name, self.TOKEN, app.load_settings(env))
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), app.make_handler(self.app))
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
+
+    def test_key_in_link_must_be_bool(self):
+        cfg = os.path.join(self.dir.name, "s.json")
+        with open(cfg, "w") as f:
+            json.dump({"key_in_link": "false"}, f)
+        with self.assertRaises(SystemExit):
+            app.load_settings({"TQ_CONFIG": cfg})
+
+    def test_non_ascii_path_is_a_clean_404(self):
+        import socket
+        with socket.create_connection(("127.0.0.1", self.srv.server_address[1]), timeout=5) as c:
+            c.sendall(b"GET /caf\xe9/ HTTP/1.0\r\n\r\n")
+            self.assertIn(b" 404 ", c.recv(200))
+
+    def test_open_root_when_key_off(self):
+        self.restart({"TQ_OEMBED": "0", "TQ_KEY_IN_LINK": "0"})
+        self.assertEqual(self.req("GET", "/")[0], 200)
+        self.assertEqual(self.req("GET", "/api/items")[0], 200)
+        self.assertEqual(self.req("GET", "/%s/" % self.app.key)[0], 200)
+        self.assertEqual(self.req("GET", "/manifest.json")[1]["start_url"], "/")
+        self.assertEqual(self.req("POST", "/api/add", {"url": "https://new.example/"})[1]["result"], "queued")
+        self.assertEqual(self.req("POST", "/api/robot/sync", {"tabs": []})[0], 403)
+        self.assertEqual(self.req("GET", "/api/robot/info")[0], 403)
+        code, info = self.req("GET", "/api/robot/info", token=self.TOKEN)
+        self.assertIs(info["key_in_link"], False)
+        code, r = self.req("POST", "/api/robot/rotate-key", {}, token=self.TOKEN)
+        self.assertIs(r["key_in_link"], False)
+        self.assertEqual(self.req("GET", "/")[0], 200)
+
     def test_robot_needs_token(self):
         self.assertEqual(self.req("POST", "/api/robot/sync", {"tabs": []})[0], 403)
         self.assertEqual(self.req("POST", "/api/robot/sync", {"tabs": []}, token="wrong")[0], 403)
@@ -290,7 +326,7 @@ class HttpTests(unittest.TestCase):
         code, r = self.req("POST", "/api/robot/sync", {"tabs": tabs((1, YT), (2, PAGE))}, token=self.TOKEN)
         self.assertEqual([a["op"] for a in r["actions"]], ["open"])
         code, info = self.req("GET", "/api/robot/info", token=self.TOKEN)
-        self.assertEqual((info["key"], info["items"]), (k, 2))
+        self.assertEqual((info["key"], info["items"], info["key_in_link"]), (k, 2, True))
 
     def test_rotate_key(self):
         old = self.app.key

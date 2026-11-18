@@ -22,7 +22,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULTS = {
@@ -36,6 +36,9 @@ DEFAULTS = {
     "order": "newest",  # or "window" (same order as the tabs on the Mac)
     "oembed": True,  # fetch the channel name of YouTube videos from youtube.com/oembed
     "max_items": 2000,
+    # False: the page also opens at "/" with no key. Only when a login in front of the server
+    # (Cloudflare Access, Tailscale, a VPN...) already keeps strangers out.
+    "key_in_link": True,
 }
 
 VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
@@ -58,6 +61,10 @@ def load_settings(env=None):
         s["lavish_match"] = json.loads(env["TQ_LAVISH_MATCH"])
     if env.get("TQ_OEMBED") in ("0", "false", "no"):
         s["oembed"] = False
+    if env.get("TQ_KEY_IN_LINK") in ("0", "false", "no"):
+        s["key_in_link"] = False
+    if not isinstance(s.get("key_in_link"), bool):
+        raise SystemExit("key_in_link must be true or false, got %r" % (s.get("key_in_link"),))
     return s
 
 
@@ -368,6 +375,11 @@ def save_key(data_dir, k):
 
 # ---------- HTTP ----------
 
+def same(a, b):
+    """Constant-time compare that never raises (the request line may hold non-ASCII bytes)."""
+    return hmac.compare_digest(a.encode("utf-8", "surrogateescape"), b.encode("utf-8", "surrogateescape"))
+
+
 def make_handler(app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "tab-queue"
@@ -404,15 +416,18 @@ def make_handler(app):
                 return {}
 
         def robot_ok(self):
-            return hmac.compare_digest(self.headers.get("X-Token", ""), app.token)
+            return same(self.headers.get("X-Token", ""), app.token)
 
         def split_key(self):
-            """'/<key>/rest' -> 'rest' when the key matches, else None."""
+            """'/<key>/rest' -> 'rest' when the key matches, else None.
+            With key_in_link off, '/rest' -> 'rest' too (the keyed link keeps working)."""
             path = urlparse(self.path).path
             parts = path.split("/", 2)
-            if len(parts) < 2 or not parts[1] or not hmac.compare_digest(parts[1], app.key):
+            if len(parts) >= 2 and parts[1] and same(parts[1], app.key):
+                return parts[2] if len(parts) > 2 else None
+            if not app.open_root:
                 return None
-            return parts[2] if len(parts) > 2 else None
+            return path[1:]
 
         def do_GET(self):
             path = urlparse(self.path).path
@@ -422,10 +437,10 @@ def make_handler(app):
                 if not self.robot_ok():
                     return self.send(403, {"error": "token"})
                 last = app.store.get_meta("last_sync")
-                return self.send(200, {"key": app.key, "version": VERSION, "last_sync": float(last) if last else None,
+                return self.send(200, {"key": app.key, "key_in_link": not app.open_root, "version": VERSION, "last_sync": float(last) if last else None,
                                        "items": app.store.items()["counts"]["all"]})
             parts = path.split("/")
-            if len(parts) == 2 and parts[1] and hmac.compare_digest(parts[1], app.key):
+            if len(parts) == 2 and parts[1] and same(parts[1], app.key):
                 self.send_response(301)
                 self.send_header("Location", "/%s/" % app.key)
                 self.end_headers()
@@ -439,7 +454,7 @@ def make_handler(app):
                 return self.send(200, app.store.items())
             if rest == "manifest.json":
                 name = app.settings.get("title") or "Tab queue"
-                return self.send(200, {"name": name, "short_name": name[:12], "start_url": "/%s/" % app.key,
+                return self.send(200, {"name": name, "short_name": name[:12], "start_url": app.base(),
                                        "display": "standalone", "background_color": "#121315",
                                        "theme_color": "#121315"}, "application/manifest+json")
             return self.send(404, {"error": "not found"})
@@ -455,7 +470,7 @@ def make_handler(app):
                                                          b.get("window_id"), b.get("version")))
                 if path == "/api/robot/rotate-key":
                     app.rotate_key()
-                    return self.send(200, {"key": app.key})
+                    return self.send(200, {"key": app.key, "key_in_link": not app.open_root})
                 return self.send(404, {"error": "not found"})
             rest = self.split_key()
             if rest is None:
@@ -481,9 +496,13 @@ class App:
         self.token = token
         self.settings = settings
         self.key = load_key(data_dir, os.environ)
+        self.open_root = not settings.get("key_in_link", True)
         self.store = store or Store(os.path.join(data_dir, "queue.db"), settings)
         with open(os.path.join(HERE, "page.html"), encoding="utf-8") as f:
             self._page = f.read()
+
+    def base(self):
+        return "/" if self.open_root else "/%s/" % self.key
 
     def rotate_key(self):
         self.key = secrets.token_urlsafe(18)

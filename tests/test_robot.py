@@ -124,11 +124,11 @@ class CliTests(Base):
         self.cli("install", "--port", "9100")
         cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
         self.assertNotIn("public_url", cfg)  # nothing derived is frozen into the config
-        self.assertEqual(mod.page_link(cfg, "K"), "http://127.0.0.1:9100/K/")
+        self.assertEqual(mod.page_link(cfg, {"key": "K"}), "http://127.0.0.1:9100/K/")
         self.cli("install", "--port", "9200", "--listen", "0.0.0.0")
         cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
         self.assertNotIn("public_url", cfg)
-        link = mod.page_link(cfg, "K")
+        link = mod.page_link(cfg, {"key": "K"})
         self.assertRegex(link, r"^http://[^/:]+:9200/K/$")
         self.assertNotIn("127.0.0.1", link)
         self.assertNotIn("0.0.0.0", link)
@@ -137,7 +137,8 @@ class CliTests(Base):
         self.assertEqual((cfg["port"], cfg["listen"]), (9200, "0.0.0.0"))
         self.cli("install", "--public-url", "https://q.example.com/")
         cfg = load(os.path.join(self.tmp, "cfg", "config.json"))
-        self.assertEqual(mod.page_link(cfg, "K"), "https://q.example.com/K/")
+        self.assertEqual(mod.page_link(cfg, {"key": "K"}), "https://q.example.com/K/")
+        self.assertEqual(mod.page_link(cfg, {"key": "K", "key_in_link": False}), "https://q.example.com/")
 
     def test_launchctl_load_waits_for_the_job_to_leave(self):
         from unittest import mock
