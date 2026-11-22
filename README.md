@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/tab-queue/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/tab-queue/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/tab-queue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue)](CHANGELOG.md)
 
 One Chrome window on your Mac becomes a queue you can see from your phone or another computer. You watch, read or
 reply, then tap **Done**, and the tab closes on the Mac. A link you send from the phone opens on the Mac in the

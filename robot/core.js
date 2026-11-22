@@ -103,11 +103,35 @@ var TQCore = (function () {
     return { close: ok, result: result };
   }
 
+  // More new tabs than this in one window in one run is a restore (Chrome "reopen window", a session
+  // restore, a tab-restoring script), not someone opening links: restored tabs get new ids.
+  var RESTORE_BURST = 3;
+
+  // Windows where more than RESTORE_BURST tabs are new (id not in seen) at once: [{window_id, count}].
+  function restoredWindows(others, seen, max) {
+    if (!seen) return [];
+    var limit = max === undefined ? RESTORE_BURST : max, count = {}, order = [];
+    (others || []).forEach(function (t) {
+      if (seen[String(t.id)]) return;
+      var k = String(t.window_id);
+      if (!(k in count)) { count[k] = 0; order.push({ key: k, id: t.window_id }); }
+      count[k]++;
+    });
+    return order.filter(function (o) { return count[o.key] > limit; })
+      .map(function (o) { return { window_id: o.id, count: count[o.key] }; });
+  }
+
   // Tabs in other windows that match routing patterns and were not there in the last run.
-  // others: [{id, url, window_id}], seen: {tabId: 1} from the last run (null on the first run: move nothing).
+  // others: [{id, url, window_id, suspended}], seen: {tabId: 1} from the last run (null on the first run: move nothing).
+  // Never routed: a suspended tab (a new tab is never suspended, so it was restored) and any tab of a window
+  // that got a burst of new tabs in this run (a restore).
   function planRoute(others, seen, patterns) {
     if (!seen) return [];
-    return (others || []).filter(function (t) { return !seen[String(t.id)] && matchesAny(t.url, patterns); });
+    var burst = {};
+    restoredWindows(others, seen).forEach(function (w) { burst[String(w.window_id)] = 1; });
+    return (others || []).filter(function (t) {
+      return !seen[String(t.id)] && !t.suspended && !burst[String(t.window_id)] && matchesAny(t.url, patterns);
+    });
   }
 
   function sameLink(a, b) {
@@ -170,6 +194,6 @@ var TQCore = (function () {
   }
 
   return { param: param, realTab: realTab, parseEtime: parseEtime, matchesAny: matchesAny, pickWindow: pickWindow,
-    planClose: planClose, planRoute: planRoute, sameLink: sameLink, findOpen: findOpen, newTab: newTab, strayWindows: strayWindows, pickAdopt: pickAdopt, restarted: restarted, stamp: stamp };
+    planClose: planClose, planRoute: planRoute, restoredWindows: restoredWindows, RESTORE_BURST: RESTORE_BURST, sameLink: sameLink, findOpen: findOpen, newTab: newTab, strayWindows: strayWindows, pickAdopt: pickAdopt, restarted: restarted, stamp: stamp };
 })();
 if (typeof module !== 'undefined') module.exports = TQCore;

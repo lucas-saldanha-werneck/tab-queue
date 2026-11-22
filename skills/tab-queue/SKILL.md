@@ -2,7 +2,7 @@
 name: tab-queue
 description: 'Set up and look after tab-queue: one Chrome window on the Mac becomes a queue the user sees on the phone or another computer; Done closes the tab on the Mac, links sent from the phone open on the Mac in the background. Use when the user says "tab-queue", "tab queue", "queue of tabs", "install the tab queue", "is the queue working?", "the queue stopped", "give me the queue link", "change the queue link/key", "the link leaked", "send this tab to the queue", or wants to read, watch or close Mac Chrome tabs from the phone.'
 argument-hint: "[install|status|link|rotate-key|send-front|once|uninstall]"
-version: "0.2.0"
+version: "0.2.1"
 metadata:
   author: Lucas Saldanha Werneck
   tags: [chrome, tabs, macos, phone]
