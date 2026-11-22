@@ -55,6 +55,29 @@ test('planRoute moves only new matching tabs, nothing on the first run', () => {
   assert.deepStrictEqual(C.planRoute(others, {}, ['[bad']), []);
 });
 
+test('planRoute never routes a suspended tab', () => {
+  const pats = ['^http://127\\.0\\.0\\.1:4387/session/'];
+  const others = [
+    { id: 11, url: 'http://127.0.0.1:4387/session/a', window_id: 2, suspended: true },
+    { id: 12, url: 'http://127.0.0.1:4387/session/b', window_id: 2, suspended: false },
+  ];
+  assert.deepStrictEqual(C.planRoute(others, { 1: 1 }, pats).map((t) => t.id), [12]);
+});
+
+test('planRoute moves nothing from a window with a burst of new tabs (restore)', () => {
+  const pats = ['^http://127\\.0\\.0\\.1:4387/session/'];
+  const restored = [];
+  for (let i = 0; i < C.RESTORE_BURST + 1; i++) restored.push({ id: 100 + i, url: 'http://127.0.0.1:4387/session/r' + i, window_id: 5 });
+  const other = { id: 200, url: 'http://127.0.0.1:4387/session/n', window_id: 6 };
+  const seen = { 1: 1 };
+  assert.deepStrictEqual(C.restoredWindows(restored.concat(other), seen), [{ window_id: 5, count: C.RESTORE_BURST + 1 }]);
+  // the burst window is skipped, a single new tab in another window still routes
+  assert.deepStrictEqual(C.planRoute(restored.concat(other), seen, pats).map((t) => t.id), [200]);
+  // exactly RESTORE_BURST new tabs is still normal
+  assert.deepStrictEqual(C.planRoute(restored.slice(0, C.RESTORE_BURST), seen, pats).length, C.RESTORE_BURST);
+  assert.deepStrictEqual(C.restoredWindows(restored, null), []);
+});
+
 test('newTab finds the tab that appeared', () => {
   const after = [{ id: 1, url: 'https://a/' }, { id: 7, url: 'https://new.example/x' }];
   assert.strictEqual(C.newTab([1], after, 'https://new.example/x').id, 7);

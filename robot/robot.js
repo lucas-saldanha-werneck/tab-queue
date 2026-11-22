@@ -6,7 +6,7 @@
 // Config: ~/.config/tab-queue/config.json (or $TQ_CONFIG_FILE). Log: ~/.local/state/tab-queue/robot.log
 ObjC.import('Foundation');
 
-var ROBOT_VERSION = '0.2.0';
+var ROBOT_VERSION = '0.2.1';
 
 function run(argv) {
   argv = argv || [];
@@ -153,7 +153,8 @@ function run(argv) {
       var out = [];
       chrome.windows().forEach(function (w) {
         if (String(w.id) === String(Q) || (w.mode || 'normal') !== 'normal') return;
-        w.tabs.forEach(function (t) { out.push({ id: t.id, url: C.realTab(t.url, t.title).url, window_id: w.id }); });
+        w.tabs.forEach(function (t) { var rt = C.realTab(t.url, t.title);
+        out.push({ id: t.id, url: rt.url, window_id: w.id, suspended: rt.suspended }); });
       });
       return out;
     }
@@ -172,7 +173,12 @@ function run(argv) {
     // (ids change when Chrome restarts, so on the first run after a restart it only records what is open)
     var routed = [];
     if (C.restarted(state, pick, startedAt)) { if (state.other_seen) log('Chrome restarted or the queue window changed: recording the other windows, moving nothing'); }
-    else routed = C.planRoute(others, state.other_seen, routes);
+    else {
+      C.restoredWindows(others, state.other_seen).forEach(function (w) {
+        log('window ' + w.window_id + ' got ' + w.count + ' new tabs at once (more than ' + C.RESTORE_BURST + '): looks like a restore, recording them and moving nothing from it');
+      });
+      routed = C.planRoute(others, state.other_seen, routes);
+    }
     routed.forEach(moveToQueue);
     if (routed.length) others = otherTabs();
     var seen = {}; others.forEach(function (t) { seen[String(t.id)] = 1; });
